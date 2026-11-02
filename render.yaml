@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: pancore
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+    disk:
+      name: pancore-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

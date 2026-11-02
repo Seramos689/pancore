@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PANCORE – Home</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%231e90ff'/><text x='50' y='62' font-size='40' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'>P</text></svg>" />
+</head>
+<body>
+  <!-- Faded watermark background -->
+  <div class="watermark" aria-hidden="true"></div>
+
+  <header class="header">
+    <a href="index.html" class="logo">
+      <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#4fc3f7"/>
+            <stop offset="100%" stop-color="#1565c0"/>
+          </linearGradient>
+        </defs>
+        <circle cx="24" cy="24" r="22" stroke="url(#logoGrad)" stroke-width="2.5" fill="rgba(30,144,255,0.12)"/>
+        <path d="M14 30V18h7.5c3.2 0 5.2 1.7 5.2 4.2 0 1.8-1 3.2-2.6 3.8L28 30h-3.2l-3.4-3.6H17.2V30H14zm3.2-6.2h4c1.5 0 2.4-.7 2.4-1.9s-.9-1.9-2.4-1.9h-4v3.8z" fill="url(#logoGrad)"/>
+        <circle cx="34" cy="14" r="3.5" fill="#4fc3f7"/>
+      </svg>
+      <span>PANCORE</span>
+    </a>
+    <nav class="nav-links">
+      <a href="index.html" class="active">Home</a>
+      <a href="login.html">Login</a>
+      <a href="register.html" class="btn btn-primary btn-sm" style="width:auto;padding:0.45rem 1rem;">Register</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>Welcome to PANCORE</h1>
+      <p>Secure, modern authentication platform built designed to turn mined BTC to actual cash.</p>
+      <div class="hero-actions">
+        <a href="register.html" class="btn btn-primary">Create Account</a>
+        <a href="login.html" class="btn btn-outline">Sign In</a>
+      </div>
+    </section>
+
+    <section class="features">
+      <div class="feature-card">
+        <div class="icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <h3>1. Fast and Reliable</h3>
+        <p>Quick processing of deposits, recharges and withdrawals with a stable platform you can trust.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </div>
+        <h3>2. 24/7 Customer Support</h3>
+        <p>Our support team is available around the clock to help with any questions or issues.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        </div>
+        <h3>3. Global Ready</h3>
+        <p>Country selector and international phone codes so you can join from anywhere in the world.</p>
+      </div>
+    </section>
+
+    <p style="text-align:center;margin-top:3rem;font-size:0.85rem;color:var(--text-muted);">
+    </p>
+  </main>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

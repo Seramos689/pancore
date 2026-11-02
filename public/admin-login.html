@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PANCORE – Admin Login</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%231e90ff'/><text x='50' y='62' font-size='40' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'>P</text></svg>" />
+</head>
+<body>
+  <header class="header">
+    <a href="/" class="logo">
+      <svg viewBox="0 0 48 48" fill="none"><defs><linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4fc3f7"/><stop offset="100%" stop-color="#1565c0"/></linearGradient></defs>
+        <circle cx="24" cy="24" r="22" stroke="url(#logoGrad)" stroke-width="2.5" fill="rgba(30,144,255,0.12)"/>
+        <path d="M14 30V18h7.5c3.2 0 5.2 1.7 5.2 4.2 0 1.8-1 3.2-2.6 3.8L28 30h-3.2l-3.4-3.6H17.2V30H14zm3.2-6.2h4c1.5 0 2.4-.7 2.4-1.9s-.9-1.9-2.4-1.9h-4v3.8z" fill="url(#logoGrad)"/>
+        <circle cx="34" cy="14" r="3.5" fill="#4fc3f7"/>
+      </svg>
+      <span>PANCORE</span>
+    </a>
+  </header>
+  <div class="auth-wrapper">
+    <div class="auth-card">
+      <div class="auth-header">
+        <h1>Admin Login</h1>
+        <p>Authorized personnel only</p>
+      </div>
+      <div id="formAlert" class="alert"></div>
+      <form id="adminLoginForm">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="adminUser" value="admin" required />
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="adminPass" placeholder="••••••••" required />
+        </div>
+        <button type="submit" class="btn btn-primary">Login as Admin</button>
+      </form>
+      <div class="auth-footer">
+        <small style="color:var(--text-muted);">Default: <code>admin</code> / <code>admin123</code></small>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.getElementById('adminLoginForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const alertEl = document.getElementById('formAlert');
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('adminUser').value.trim(),
+          password: document.getElementById('adminPass').value
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        window.location.href = '/admin.html';
+      } else {
+        alertEl.textContent = data.message || 'Invalid credentials.';
+        alertEl.className = 'alert alert-error show';
+      }
+    });
+  </script>
+</body>
+</html>
