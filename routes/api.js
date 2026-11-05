@@ -34,7 +34,6 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Username already taken.' });
     }
 
-    const verifyCode = uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase();
     const hashed = await bcrypt.hash(password, 10);
 
     const user = {
@@ -49,23 +48,18 @@ router.post('/register', async (req, res) => {
       password: hashed,
       balance: 0,
       transactions: [],
-      verified: false,
+      verified: true, // no email service — account active immediately
       active: true,
-      verifyCode,
-      verifyExpires: Date.now() + 60 * 60 * 1000,
       createdAt: new Date().toISOString()
     };
 
     users.push(user);
     store.saveUsers(users);
 
-    console.log(`[PANCORE] Verification code for ${user.email}: ${verifyCode}`);
-
     res.json({
       success: true,
-      message: 'Registration successful! Please verify your email.',
-      email: user.email,
-      demoToken: verifyCode // remove in strict production
+      message: 'Registration successful! You can now log in.',
+      email: user.email
     });
   } catch (err) {
     console.error(err);
@@ -135,14 +129,6 @@ router.post('/login', async (req, res) => {
 
     if (user.active === false) {
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact support.' });
-    }
-    if (!user.verified) {
-      return res.status(403).json({
-        success: false,
-        message: 'Please verify your email before logging in.',
-        needsVerification: true,
-        email: user.email
-      });
     }
 
     const token = signUser(user);

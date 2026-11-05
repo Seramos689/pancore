@@ -133,11 +133,10 @@ async function handleRegister(e) {
   });
 
   if (ok && data.success) {
-    if (data.demoToken) {
-      sessionStorage.setItem('pancore_demo_code', data.demoToken);
-      sessionStorage.setItem('pancore_pending_email', data.email);
-    }
-    window.location.href = 'verify.html?email=' + encodeURIComponent(data.email);
+    showAlert(alertEl, data.message || 'Registration successful! Redirecting to login...', 'success');
+    setTimeout(() => {
+      window.location.href = 'login.html';
+    }, 1200);
   } else {
     showAlert(alertEl, data.message || 'Registration failed.');
     btn.disabled = false;
@@ -165,11 +164,6 @@ async function handleLogin(e) {
   if (ok && data.success) {
     if (data.token) localStorage.setItem('pancore_token', data.token);
     window.location.href = 'dashboard.html';
-  } else if (data.needsVerification) {
-    showAlert(alertEl, data.message, 'info');
-    setTimeout(() => {
-      window.location.href = 'verify.html?email=' + encodeURIComponent(data.email);
-    }, 1500);
   } else {
     showAlert(alertEl, data.message || 'Login failed.');
     btn.disabled = false;
