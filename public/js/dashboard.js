@@ -31,9 +31,17 @@ async function initDashboard() {
   renderHistory(currentUser);
   renderStatement(currentUser);
   renderRechargeHistory(currentUser);
+  updateRechargeActivationWarning(currentUser);
   loadContactInfo();
   setupSidebar();
   setupCoinMenu();
+}
+
+function updateRechargeActivationWarning(user) {
+  const warning = document.getElementById('rechargeActivationWarning');
+  if (!warning) return;
+  const activated = user.activated === true || Number(user.totalDeposited || 0) >= 25;
+  warning.style.display = activated ? 'none' : 'block';
 }
 
 function renderUser(user) {
@@ -152,6 +160,12 @@ async function submitRechargeCode() {
   const input = document.getElementById('rechargeCode');
   const code = (input.value || '').trim().toUpperCase();
   if (!code) { alert('Please enter a recharge code.'); return; }
+
+  if (currentUser && currentUser.activated !== true && Number(currentUser.totalDeposited || 0) < 25) {
+    alert('Please activate your account by depositing in your account');
+    return;
+  }
+
   const { ok, data } = await api('/recharge', { method: 'POST', body: { code } });
   if (ok && data.success) {
     input.value = '';

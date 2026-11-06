@@ -48,6 +48,8 @@ router.post('/register', async (req, res) => {
       password: hashed,
       balance: 0,
       transactions: [],
+      totalDeposited: 0,
+      activated: false, // requires min $25 deposit before recharge codes
       verified: true, // no email service — account active immediately
       active: true,
       createdAt: new Date().toISOString()
@@ -183,7 +185,10 @@ router.get('/me', authUser, (req, res) => {
       transactions: user.transactions || [],
       createdAt: user.createdAt,
       active: user.active !== false,
-      verified: user.verified
+      verified: user.verified,
+      activated: isAccountActivated(user),
+      totalDeposited: getTotalDeposited(user),
+      minActivationDeposit: MIN_ACTIVATION_DEPOSIT
     }
   });
 });
@@ -231,18 +236,64 @@ router.post('/reset/confirm', authUser, async (req, res) => {
   res.json({ success: true, message: 'Password reset successfully.' });
 });
 
+// Minimum deposit required before recharge codes can be used
+const MIN_ACTIVATION_DEPOSIT = 25;
+
+function getTotalDeposited(user) {
+  if (user.totalDeposited != null && user.totalDeposited !== undefined) {
+    return Number(user.totalDeposited) || 0;
+  }
+  // Fallback for older accounts that don't have totalDeposited yet
+  return (user.transactions || [])
+    .filter(t => t.type === 'deposit' && t.status === 'completed')
+    .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+}
+
+function isAccountActivated(user) {
+  if (user.activated === true) return true;
+  return getTotalDeposited(user) >= MIN_ACTIVATION_DEPOSIT;
+}
+
+function applyDepositCredit(user, amount) {
+  const amt = Number(amount) || 0;
+  user.balance = Number(user.balance || 0) + amt;
+  if (user.totalDeposited == null || user.totalDeposited === undefined) {
+    // First time: sum completed deposit transactions (already includes this one if marked completed)
+    user.totalDeposited = (user.transactions || [])
+      .filter(t => t.type === 'deposit' && t.status === 'completed')
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    // If this deposit is not yet in transactions, add it
+    if (user.totalDeposited < amt) user.totalDeposited = Number(user.totalDeposited) + amt;
+  } else {
+    user.totalDeposited = Number(user.totalDeposited) + amt;
+  }
+  if (user.totalDeposited >= MIN_ACTIVATION_DEPOSIT) {
+    user.activated = true;
+  }
+  return user;
+}
+
 // ---------- Recharge ----------
 router.post('/recharge', authUser, (req, res) => {
   const code = (req.body.code || '').trim().toUpperCase();
   if (!code) return res.status(400).json({ success: false, message: 'Enter a recharge code.' });
 
+  const user = store.findUserById(req.user.id);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+  if (!isAccountActivated(user)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Please activate your account by depositing in your account',
+      needsActivation: true,
+      minDeposit: MIN_ACTIVATION_DEPOSIT
+    });
+  }
+
   const codes = store.getCodes();
   const found = codes.find(c => c.code === code);
   if (!found) return res.status(400).json({ success: false, message: 'Invalid recharge code.' });
   if (found.used) return res.status(400).json({ success: false, message: 'This code has already been used.' });
-
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
   found.used = true;
   found.usedBy = user.email;
@@ -490,13 +541,18 @@ router.post('/admin/funds', authAdmin, (req, res) => {
   if (!userId || !amt || amt <= 0) return res.status(400).json({ success: false, message: 'Invalid input.' });
   const user = store.findUserById(userId);
   if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  user.balance = Number(user.balance || 0) + amt;
   if (!user.transactions) user.transactions = [];
   user.transactions.unshift({
     id: uuidv4(), type: 'deposit', amount: amt, status: 'completed',
     date: new Date().toISOString(), note: 'Admin credit'
   });
-  store.updateUser(user.id, { balance: user.balance, transactions: user.transactions });
+  applyDepositCredit(user, amt);
+  store.updateUser(user.id, {
+    balance: user.balance,
+    transactions: user.transactions,
+    totalDeposited: user.totalDeposited,
+    activated: user.activated
+  });
   res.json({ success: true, balance: user.balance });
 });
 
@@ -515,12 +571,17 @@ router.post('/admin/deposits/:id/approve', authAdmin, (req, res) => {
 
   const user = store.findUserById(reqItem.userId);
   if (user) {
-    user.balance = Number(user.balance || 0) + Number(reqItem.amount);
     if (user.transactions) {
       const tx = user.transactions.find(t => t.type === 'deposit' && t.amount === reqItem.amount && t.status === 'pending');
       if (tx) tx.status = 'completed';
     }
-    store.updateUser(user.id, { balance: user.balance, transactions: user.transactions });
+    applyDepositCredit(user, reqItem.amount);
+    store.updateUser(user.id, {
+      balance: user.balance,
+      transactions: user.transactions,
+      totalDeposited: user.totalDeposited,
+      activated: user.activated
+    });
   }
   res.json({ success: true });
 });
