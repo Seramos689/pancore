@@ -1,15 +1,23 @@
 // PANCORE Dashboard – API driven
 
 async function api(path, options = {}) {
+  const token = localStorage.getItem('pancore_token');
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {})
+  };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+
   const opts = {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
+    ...options,
+    headers
   };
   if (opts.body && typeof opts.body === 'object') opts.body = JSON.stringify(opts.body);
   const res = await fetch('/api' + path, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
+    localStorage.removeItem('pancore_token');
     window.location.href = 'login.html';
     return { ok: false, data };
   }

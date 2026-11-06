@@ -5,8 +5,48 @@ const store = require('../data/store');
 const { signUser, signAdmin, authUser, authAdmin, isValidPassword } = require('../middleware/auth');
 
 const router = express.Router();
+const MIN_ACTIVATION_DEPOSIT = 25;
 
-// ---------- Auth: Register ----------
+function getTotalDeposited(user) {
+  if (user.totalDeposited != null && user.totalDeposited !== undefined) {
+    return Number(user.totalDeposited) || 0;
+  }
+  return (user.transactions || [])
+    .filter(t => t.type === 'deposit' && t.status === 'completed')
+    .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+}
+
+function isAccountActivated(user) {
+  if (user.activated === true) return true;
+  return getTotalDeposited(user) >= MIN_ACTIVATION_DEPOSIT;
+}
+
+async function applyDepositCredit(userId, amount) {
+  const user = await store.findUserById(userId);
+  if (!user) return null;
+  const amt = Number(amount) || 0;
+  const balance = Number(user.balance || 0) + amt;
+  let totalDeposited;
+  if (user.totalDeposited == null || user.totalDeposited === undefined) {
+    totalDeposited = (user.transactions || [])
+      .filter(t => t.type === 'deposit' && t.status === 'completed')
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    if (totalDeposited < amt) totalDeposited += amt;
+  } else {
+    totalDeposited = Number(user.totalDeposited) + amt;
+  }
+  const activated = totalDeposited >= MIN_ACTIVATION_DEPOSIT ? true : !!user.activated;
+  return store.updateUser(userId, { balance, totalDeposited, activated });
+}
+
+async function resolveUser(reqUser) {
+  if (!reqUser) return null;
+  let user = await store.findUserById(reqUser.id);
+  if (!user && reqUser.email) user = await store.findUserByEmail(reqUser.email);
+  return user;
+}
+
+// ---------- Register ----------
 router.post('/register', async (req, res) => {
   try {
     const {
@@ -26,17 +66,16 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    const users = store.getUsers();
-    if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+    if (await store.findUserByEmail(email)) {
       return res.status(400).json({ success: false, message: 'Email already registered.' });
     }
-    if (users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
+    const existingUser = await store.findUserByLogin(username);
+    if (existingUser && existingUser.username.toLowerCase() === username.toLowerCase()) {
       return res.status(400).json({ success: false, message: 'Username already taken.' });
     }
 
     const hashed = await bcrypt.hash(password, 10);
-
-    const user = {
+    await store.createUser({
       id: uuidv4(),
       firstName: firstName.trim(),
       lastName: lastName.trim(),
@@ -49,68 +88,24 @@ router.post('/register', async (req, res) => {
       balance: 0,
       transactions: [],
       totalDeposited: 0,
-      activated: false, // requires min $25 deposit before recharge codes
-      verified: true, // no email service — account active immediately
+      activated: false,
+      verified: true,
       active: true,
       createdAt: new Date().toISOString()
-    };
-
-    users.push(user);
-    store.saveUsers(users);
+    });
 
     res.json({
       success: true,
       message: 'Registration successful! You can now log in.',
-      email: user.email
+      email: email.trim().toLowerCase()
     });
   } catch (err) {
     console.error(err);
+    if (err.code === 11000) {
+      return res.status(400).json({ success: false, message: 'Email or username already exists.' });
+    }
     res.status(500).json({ success: false, message: 'Server error during registration.' });
   }
-});
-
-// ---------- Verify ----------
-router.post('/verify', (req, res) => {
-  try {
-    const { email, code } = req.body;
-    if (!email || !code) return res.status(400).json({ success: false, message: 'Email and code required.' });
-
-    const users = store.getUsers();
-    const user = users.find(u => u.email === email.toLowerCase());
-    if (!user) return res.status(400).json({ success: false, message: 'User not found.' });
-    if (user.verified) return res.json({ success: true, message: 'Already verified.' });
-    if (user.verifyExpires && Date.now() > user.verifyExpires) {
-      return res.status(400).json({ success: false, message: 'Code expired. Register again or resend.' });
-    }
-    if (user.verifyCode !== code.trim().toUpperCase()) {
-      return res.status(400).json({ success: false, message: 'Invalid verification code.' });
-    }
-
-    user.verified = true;
-    delete user.verifyCode;
-    delete user.verifyExpires;
-    store.saveUsers(users);
-    res.json({ success: true, message: 'Email verified successfully! You can now log in.' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error.' });
-  }
-});
-
-router.post('/resend-code', (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ success: false, message: 'Email required.' });
-  const users = store.getUsers();
-  const user = users.find(u => u.email === email.toLowerCase());
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  if (user.verified) return res.status(400).json({ success: false, message: 'Already verified.' });
-
-  const code = uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase();
-  user.verifyCode = code;
-  user.verifyExpires = Date.now() + 60 * 60 * 1000;
-  store.saveUsers(users);
-  console.log(`[PANCORE] New verification code for ${user.email}: ${code}`);
-  res.json({ success: true, message: 'New code sent.', demoToken: code });
 });
 
 // ---------- Login ----------
@@ -121,9 +116,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email/Username and password required.' });
     }
 
-    const user = store.findUser(
-      u => u.email === emailOrUsername.toLowerCase() || u.username.toLowerCase() === emailOrUsername.toLowerCase()
-    );
+    const user = await store.findUserByLogin(emailOrUsername);
     if (!user) return res.status(401).json({ success: false, message: 'Invalid credentials.' });
 
     const match = await bcrypt.compare(password, user.password);
@@ -168,307 +161,335 @@ router.post('/logout', (req, res) => {
 });
 
 // ---------- Me ----------
-router.get('/me', authUser, (req, res) => {
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  res.json({
-    success: true,
-    user: {
-      id: user.id,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      username: user.username,
-      email: user.email,
-      phone: user.phone,
-      country: user.country,
-      balance: user.balance || 0,
-      transactions: user.transactions || [],
-      createdAt: user.createdAt,
-      active: user.active !== false,
-      verified: user.verified,
-      activated: isAccountActivated(user),
-      totalDeposited: getTotalDeposited(user),
-      minActivationDeposit: MIN_ACTIVATION_DEPOSIT
+router.get('/me', authUser, async (req, res) => {
+  try {
+    const user = await resolveUser(req.user);
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session expired. Please log in again.'
+      });
     }
-  });
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        username: user.username,
+        email: user.email,
+        phone: user.phone,
+        country: user.country,
+        balance: user.balance || 0,
+        transactions: user.transactions || [],
+        createdAt: user.createdAt,
+        active: user.active !== false,
+        verified: user.verified,
+        activated: isAccountActivated(user),
+        totalDeposited: getTotalDeposited(user),
+        minActivationDeposit: MIN_ACTIVATION_DEPOSIT
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 // ---------- Profile ----------
-router.put('/profile', authUser, (req, res) => {
-  const { firstName, lastName, phone } = req.body;
-  const user = store.updateUser(req.user.id, {
-    firstName: (firstName || '').trim(),
-    lastName: (lastName || '').trim(),
-    phone: (phone || '').trim()
-  });
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  res.json({ success: true, message: 'Profile updated.', user: { firstName: user.firstName, lastName: user.lastName, phone: user.phone } });
+router.put('/profile', authUser, async (req, res) => {
+  try {
+    const { firstName, lastName, phone } = req.body;
+    const user = await store.updateUser(req.user.id, {
+      firstName: (firstName || '').trim(),
+      lastName: (lastName || '').trim(),
+      phone: (phone || '').trim()
+    });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    res.json({
+      success: true,
+      message: 'Profile updated.',
+      user: { firstName: user.firstName, lastName: user.lastName, phone: user.phone }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 // ---------- Reset password ----------
-router.post('/reset/send-code', authUser, (req, res) => {
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  const code = uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase();
-  store.updateUser(user.id, { recoveryCode: code, recoveryExpires: Date.now() + 15 * 60 * 1000 });
-  console.log(`[PANCORE] Recovery code for ${user.email}: ${code}`);
-  res.json({ success: true, message: 'Recovery code sent.', demoToken: code });
+router.post('/reset/send-code', authUser, async (req, res) => {
+  try {
+    const user = await resolveUser(req.user);
+    if (!user) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+    const code = uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase();
+    await store.updateUser(user.id, { recoveryCode: code, recoveryExpires: Date.now() + 15 * 60 * 1000 });
+    console.log(`[PANCORE] Recovery code for ${user.email}: ${code}`);
+    res.json({ success: true, message: 'Recovery code sent.', demoToken: code });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 router.post('/reset/confirm', authUser, async (req, res) => {
-  const { code, newPassword, confirmPassword } = req.body;
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  if (!user.recoveryCode || user.recoveryCode !== (code || '').trim().toUpperCase()) {
-    return res.status(400).json({ success: false, message: 'Invalid recovery code.' });
+  try {
+    const { code, newPassword, confirmPassword } = req.body;
+    const user = await resolveUser(req.user);
+    if (!user) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+    if (!user.recoveryCode || user.recoveryCode !== (code || '').trim().toUpperCase()) {
+      return res.status(400).json({ success: false, message: 'Invalid recovery code.' });
+    }
+    if (user.recoveryExpires && Date.now() > user.recoveryExpires) {
+      return res.status(400).json({ success: false, message: 'Code expired.' });
+    }
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters with upper, lower, number and symbol.'
+      });
+    }
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match.' });
+    }
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await store.updateUser(user.id, {
+      password: hashed,
+      recoveryCode: undefined,
+      recoveryExpires: undefined
+    });
+    res.json({ success: true, message: 'Password reset successfully.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-  if (user.recoveryExpires && Date.now() > user.recoveryExpires) {
-    return res.status(400).json({ success: false, message: 'Code expired.' });
-  }
-  if (!isValidPassword(newPassword)) {
-    return res.status(400).json({ success: false, message: 'Password does not meet requirements.' });
-  }
-  if (newPassword !== confirmPassword) {
-    return res.status(400).json({ success: false, message: 'Passwords do not match.' });
-  }
-  const hashed = await bcrypt.hash(newPassword, 10);
-  store.updateUser(user.id, { password: hashed, recoveryCode: undefined, recoveryExpires: undefined });
-  res.json({ success: true, message: 'Password reset successfully.' });
 });
 
-// Minimum deposit required before recharge codes can be used
-const MIN_ACTIVATION_DEPOSIT = 25;
-
-function getTotalDeposited(user) {
-  if (user.totalDeposited != null && user.totalDeposited !== undefined) {
-    return Number(user.totalDeposited) || 0;
-  }
-  // Fallback for older accounts that don't have totalDeposited yet
-  return (user.transactions || [])
-    .filter(t => t.type === 'deposit' && t.status === 'completed')
-    .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-}
-
-function isAccountActivated(user) {
-  if (user.activated === true) return true;
-  return getTotalDeposited(user) >= MIN_ACTIVATION_DEPOSIT;
-}
-
-function applyDepositCredit(user, amount) {
-  const amt = Number(amount) || 0;
-  user.balance = Number(user.balance || 0) + amt;
-  if (user.totalDeposited == null || user.totalDeposited === undefined) {
-    // First time: sum completed deposit transactions (already includes this one if marked completed)
-    user.totalDeposited = (user.transactions || [])
-      .filter(t => t.type === 'deposit' && t.status === 'completed')
-      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-    // If this deposit is not yet in transactions, add it
-    if (user.totalDeposited < amt) user.totalDeposited = Number(user.totalDeposited) + amt;
-  } else {
-    user.totalDeposited = Number(user.totalDeposited) + amt;
-  }
-  if (user.totalDeposited >= MIN_ACTIVATION_DEPOSIT) {
-    user.activated = true;
-  }
-  return user;
-}
-
 // ---------- Recharge ----------
-router.post('/recharge', authUser, (req, res) => {
-  const code = (req.body.code || '').trim().toUpperCase();
-  if (!code) return res.status(400).json({ success: false, message: 'Enter a recharge code.' });
+router.post('/recharge', authUser, async (req, res) => {
+  try {
+    const code = (req.body.code || '').trim().toUpperCase();
+    if (!code) return res.status(400).json({ success: false, message: 'Enter a recharge code.' });
 
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    const user = await resolveUser(req.user);
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session expired. Please log in again.'
+      });
+    }
 
-  if (!isAccountActivated(user)) {
-    return res.status(403).json({
-      success: false,
-      message: 'Please activate your account by depositing in your account',
-      needsActivation: true,
-      minDeposit: MIN_ACTIVATION_DEPOSIT
+    if (!isAccountActivated(user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Please activate your account by depositing in your account',
+        needsActivation: true,
+        minDeposit: MIN_ACTIVATION_DEPOSIT
+      });
+    }
+
+    const found = await store.findCode(code);
+    if (!found) return res.status(400).json({ success: false, message: 'Invalid recharge code.' });
+    if (found.used) return res.status(400).json({ success: false, message: 'This code has already been used.' });
+
+    await store.updateCode(code, {
+      used: true,
+      usedBy: user.email,
+      usedAt: new Date().toISOString()
     });
+
+    const amount = Number(found.price);
+    const transactions = user.transactions || [];
+    transactions.unshift({
+      id: uuidv4(),
+      type: 'recharge',
+      amount,
+      status: 'completed',
+      code: found.code,
+      date: new Date().toISOString()
+    });
+    const balance = Number(user.balance || 0) + amount;
+    await store.updateUser(user.id, { balance, transactions });
+
+    await store.addNotification('recharge', `User ${user.email} recharged $${amount} with code ${code}`, {
+      userId: user.id, amount
+    });
+
+    res.json({ success: true, message: `$${amount.toFixed(2)} added to your account.`, balance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-
-  const codes = store.getCodes();
-  const found = codes.find(c => c.code === code);
-  if (!found) return res.status(400).json({ success: false, message: 'Invalid recharge code.' });
-  if (found.used) return res.status(400).json({ success: false, message: 'This code has already been used.' });
-
-  found.used = true;
-  found.usedBy = user.email;
-  found.usedAt = new Date().toISOString();
-  store.saveCodes(codes);
-
-  const amount = Number(found.price);
-  user.balance = Number(user.balance || 0) + amount;
-  if (!user.transactions) user.transactions = [];
-  user.transactions.unshift({
-    id: uuidv4(),
-    type: 'recharge',
-    amount,
-    status: 'completed',
-    code: found.code,
-    date: new Date().toISOString()
-  });
-  store.updateUser(user.id, { balance: user.balance, transactions: user.transactions });
-
-  store.addNotification('recharge', `User ${user.email} recharged $${amount} with code ${code}`, {
-    userId: user.id, amount
-  });
-
-  res.json({ success: true, message: `$${amount.toFixed(2)} added to your account.`, balance: user.balance });
 });
 
 // ---------- Deposit ----------
-router.post('/deposit', authUser, (req, res) => {
-  const amount = parseFloat(req.body.amount);
-  if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount.' });
+router.post('/deposit', authUser, async (req, res) => {
+  try {
+    const amount = parseFloat(req.body.amount);
+    if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount.' });
 
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    const user = await resolveUser(req.user);
+    if (!user) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
 
-  if (!user.transactions) user.transactions = [];
-  user.transactions.unshift({
-    id: uuidv4(),
-    type: 'deposit',
-    amount,
-    status: 'pending',
-    date: new Date().toISOString()
-  });
-  store.updateUser(user.id, { transactions: user.transactions });
+    const transactions = user.transactions || [];
+    transactions.unshift({
+      id: uuidv4(),
+      type: 'deposit',
+      amount,
+      status: 'pending',
+      date: new Date().toISOString()
+    });
+    await store.updateUser(user.id, { transactions });
 
-  const deposits = store.getDeposits();
-  deposits.unshift({
-    id: uuidv4(),
-    userId: user.id,
-    email: user.email,
-    username: user.username,
-    amount,
-    status: 'pending',
-    date: new Date().toISOString()
-  });
-  store.saveDeposits(deposits);
+    await store.createDeposit({
+      id: uuidv4(),
+      userId: user.id,
+      email: user.email,
+      username: user.username,
+      amount,
+      status: 'pending',
+      date: new Date().toISOString()
+    });
 
-  store.addNotification('deposit', `Deposit request of $${amount.toFixed(2)} from ${user.email}`, {
-    userId: user.id, amount, status: 'pending'
-  });
+    await store.addNotification('deposit', `Deposit request of $${amount.toFixed(2)} from ${user.email}`, {
+      userId: user.id, amount, status: 'pending'
+    });
 
-  const settings = store.getSettings();
-  res.json({
-    success: true,
-    message: 'Deposit request submitted.',
-    btcWallet: settings.btcWallet,
-    amount
-  });
+    const settings = await store.getSettings();
+    res.json({
+      success: true,
+      message: 'Deposit request submitted.',
+      btcWallet: settings.btcWallet,
+      amount
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 // ---------- Withdraw ----------
-router.post('/withdraw', authUser, (req, res) => {
-  const amount = parseFloat(req.body.amount);
-  const wallet = (req.body.wallet || '').trim();
-  if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount.' });
-  if (!wallet || wallet.length < 20) return res.status(400).json({ success: false, message: 'Invalid BTC wallet.' });
+router.post('/withdraw', authUser, async (req, res) => {
+  try {
+    const amount = parseFloat(req.body.amount);
+    const wallet = (req.body.wallet || '').trim();
+    if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount.' });
+    if (!wallet || wallet.length < 20) return res.status(400).json({ success: false, message: 'Invalid BTC wallet.' });
 
-  const user = store.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  if (amount > Number(user.balance || 0)) {
-    return res.status(400).json({ success: false, message: 'Insufficient balance.' });
+    const user = await resolveUser(req.user);
+    if (!user) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+    if (amount > Number(user.balance || 0)) {
+      return res.status(400).json({ success: false, message: 'Insufficient balance.' });
+    }
+
+    const balance = Number(user.balance || 0) - amount;
+    const transactions = user.transactions || [];
+    transactions.unshift({
+      id: uuidv4(),
+      type: 'withdraw',
+      amount,
+      status: 'pending',
+      wallet,
+      date: new Date().toISOString()
+    });
+    await store.updateUser(user.id, { balance, transactions });
+
+    await store.createWithdraw({
+      id: uuidv4(),
+      userId: user.id,
+      email: user.email,
+      username: user.username,
+      amount,
+      wallet,
+      status: 'pending',
+      date: new Date().toISOString()
+    });
+
+    await store.addNotification('withdraw', `Withdraw request of $${amount.toFixed(2)} from ${user.email}`, {
+      userId: user.id, amount
+    });
+
+    res.json({ success: true, message: 'Withdrawal initiated.', balance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-
-  user.balance = Number(user.balance || 0) - amount;
-  if (!user.transactions) user.transactions = [];
-  user.transactions.unshift({
-    id: uuidv4(),
-    type: 'withdraw',
-    amount,
-    status: 'pending',
-    wallet,
-    date: new Date().toISOString()
-  });
-  store.updateUser(user.id, { balance: user.balance, transactions: user.transactions });
-
-  const withdraws = store.getWithdraws();
-  withdraws.unshift({
-    id: uuidv4(),
-    userId: user.id,
-    email: user.email,
-    username: user.username,
-    amount,
-    wallet,
-    status: 'pending',
-    date: new Date().toISOString()
-  });
-  store.saveWithdraws(withdraws);
-
-  store.addNotification('withdraw', `Withdraw request of $${amount.toFixed(2)} from ${user.email}`, {
-    userId: user.id, amount
-  });
-
-  res.json({ success: true, message: 'Withdrawal initiated.', balance: user.balance });
 });
 
 // ---------- Support ----------
-router.post('/support', authUser, (req, res) => {
-  const { subject, message } = req.body;
-  if (!subject || !message) return res.status(400).json({ success: false, message: 'Subject and message required.' });
-  const user = store.findUserById(req.user.id);
-  const msgs = store.getMessages();
-  msgs.unshift({
-    id: uuidv4(),
-    userId: user?.id,
-    email: user?.email,
-    username: user?.username,
-    subject: subject.trim(),
-    message: message.trim(),
-    date: new Date().toISOString(),
-    read: false
-  });
-  store.saveMessages(msgs);
-  store.addNotification('support', `Support message from ${user?.email}: ${subject}`);
-  res.json({ success: true, message: 'Message sent.' });
+router.post('/support', authUser, async (req, res) => {
+  try {
+    const { subject, message } = req.body;
+    if (!subject || !message) return res.status(400).json({ success: false, message: 'Subject and message required.' });
+    const user = await resolveUser(req.user);
+    await store.createMessage({
+      id: uuidv4(),
+      userId: user?.id,
+      email: user?.email,
+      username: user?.username,
+      subject: subject.trim(),
+      message: message.trim(),
+      date: new Date().toISOString(),
+      read: false
+    });
+    await store.addNotification('support', `Support message from ${user?.email}: ${subject}`);
+    res.json({ success: true, message: 'Message sent.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
-router.get('/contact', (req, res) => {
-  const s = store.getSettings();
-  res.json({
-    success: true,
-    contact: {
-      email: s.contactEmail || '',
-      phone: s.contactPhone || '',
-      address: s.contactAddress || ''
-    },
-    btcWallet: s.btcWallet
-  });
+router.get('/contact', async (req, res) => {
+  try {
+    const s = await store.getSettings();
+    res.json({
+      success: true,
+      contact: {
+        email: s.contactEmail || '',
+        phone: s.contactPhone || '',
+        address: s.contactAddress || ''
+      },
+      btcWallet: s.btcWallet
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 // ==================== ADMIN ====================
 
 router.post('/admin/login', async (req, res) => {
-  const { username, password } = req.body;
-  const settings = store.getSettings();
+  try {
+    const { username, password } = req.body;
+    let settings = await store.getSettings();
 
-  // Bootstrap default admin on first run
-  if (!settings.adminPasswordHash) {
-    settings.adminUsername = 'admin';
-    settings.adminPasswordHash = await bcrypt.hash('admin123', 10);
-    store.saveSettings(settings);
+    if (!settings.adminPasswordHash) {
+      settings = await store.saveSettings({
+        adminUsername: 'admin',
+        adminPasswordHash: await bcrypt.hash('admin123', 10)
+      });
+    }
+
+    if (username !== settings.adminUsername) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+    }
+    const ok = await bcrypt.compare(password, settings.adminPasswordHash);
+    if (!ok) return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+
+    const token = signAdmin();
+    res.cookie('adminToken', token, {
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production'
+    });
+    res.json({ success: true, token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-
-  if (username !== settings.adminUsername) {
-    return res.status(401).json({ success: false, message: 'Invalid credentials.' });
-  }
-  const ok = await bcrypt.compare(password, settings.adminPasswordHash);
-  if (!ok) return res.status(401).json({ success: false, message: 'Invalid credentials.' });
-
-  const token = signAdmin();
-  res.cookie('adminToken', token, {
-    httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production'
-  });
-  res.json({ success: true, token });
 });
 
 router.post('/admin/logout', (req, res) => {
@@ -476,227 +497,324 @@ router.post('/admin/logout', (req, res) => {
   res.json({ success: true });
 });
 
-router.get('/admin/users', authAdmin, (req, res) => {
-  const users = store.getUsers().map(u => ({
-    id: u.id,
-    firstName: u.firstName,
-    lastName: u.lastName,
-    username: u.username,
-    email: u.email,
-    balance: u.balance || 0,
-    active: u.active !== false,
-    verified: !!u.verified,
-    createdAt: u.createdAt
-  }));
-  res.json({ success: true, users });
+router.get('/admin/users', authAdmin, async (req, res) => {
+  try {
+    const users = (await store.getUsers()).map(u => ({
+      id: u.id,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      username: u.username,
+      email: u.email,
+      balance: u.balance || 0,
+      active: u.active !== false,
+      verified: !!u.verified,
+      activated: isAccountActivated(u),
+      createdAt: u.createdAt
+    }));
+    res.json({ success: true, users });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 router.post('/admin/users', authAdmin, async (req, res) => {
-  const { firstName, lastName, username, email, password, balance } = req.body;
-  if (!username || !email || !password) {
-    return res.status(400).json({ success: false, message: 'Username, email and password required.' });
-  }
-  const users = store.getUsers();
-  if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-    return res.status(400).json({ success: false, message: 'Email exists.' });
-  }
-  if (users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
-    return res.status(400).json({ success: false, message: 'Username taken.' });
-  }
-  const hashed = await bcrypt.hash(password, 10);
-  users.push({
-    id: uuidv4(),
-    firstName: firstName || '',
-    lastName: lastName || '',
-    username: username.trim(),
-    email: email.trim().toLowerCase(),
-    password: hashed,
-    balance: Number(balance) || 0,
-    transactions: [],
-    verified: true,
-    active: true,
-    createdAt: new Date().toISOString()
-  });
-  store.saveUsers(users);
-  res.json({ success: true, message: 'User created.' });
-});
-
-router.post('/admin/users/:id/toggle', authAdmin, (req, res) => {
-  const user = store.findUserById(req.params.id);
-  if (!user) return res.status(404).json({ success: false, message: 'Not found.' });
-  const active = user.active === false ? true : false;
-  store.updateUser(user.id, { active });
-  res.json({ success: true, active });
-});
-
-router.delete('/admin/users/:id', authAdmin, (req, res) => {
-  let users = store.getUsers().filter(u => u.id !== req.params.id);
-  store.saveUsers(users);
-  res.json({ success: true });
-});
-
-router.post('/admin/funds', authAdmin, (req, res) => {
-  const { userId, amount } = req.body;
-  const amt = parseFloat(amount);
-  if (!userId || !amt || amt <= 0) return res.status(400).json({ success: false, message: 'Invalid input.' });
-  const user = store.findUserById(userId);
-  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  if (!user.transactions) user.transactions = [];
-  user.transactions.unshift({
-    id: uuidv4(), type: 'deposit', amount: amt, status: 'completed',
-    date: new Date().toISOString(), note: 'Admin credit'
-  });
-  applyDepositCredit(user, amt);
-  store.updateUser(user.id, {
-    balance: user.balance,
-    transactions: user.transactions,
-    totalDeposited: user.totalDeposited,
-    activated: user.activated
-  });
-  res.json({ success: true, balance: user.balance });
-});
-
-router.get('/admin/deposits', authAdmin, (req, res) => {
-  res.json({ success: true, deposits: store.getDeposits() });
-});
-
-router.post('/admin/deposits/:id/approve', authAdmin, (req, res) => {
-  const list = store.getDeposits();
-  const reqItem = list.find(r => r.id === req.params.id);
-  if (!reqItem || reqItem.status !== 'pending') {
-    return res.status(400).json({ success: false, message: 'Invalid request.' });
-  }
-  reqItem.status = 'approved';
-  store.saveDeposits(list);
-
-  const user = store.findUserById(reqItem.userId);
-  if (user) {
-    if (user.transactions) {
-      const tx = user.transactions.find(t => t.type === 'deposit' && t.amount === reqItem.amount && t.status === 'pending');
-      if (tx) tx.status = 'completed';
+  try {
+    const { firstName, lastName, username, email, password, balance } = req.body;
+    if (!username || !email || !password) {
+      return res.status(400).json({ success: false, message: 'Username, email and password required.' });
     }
-    applyDepositCredit(user, reqItem.amount);
-    store.updateUser(user.id, {
-      balance: user.balance,
-      transactions: user.transactions,
-      totalDeposited: user.totalDeposited,
-      activated: user.activated
+    if (await store.findUserByEmail(email)) {
+      return res.status(400).json({ success: false, message: 'Email already exists.' });
+    }
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await store.createUser({
+      id: uuidv4(),
+      firstName: firstName || '',
+      lastName: lastName || '',
+      username,
+      email: email.toLowerCase(),
+      phone: '',
+      country: '',
+      countryCode: '',
+      password: hashed,
+      balance: Number(balance) || 0,
+      transactions: [],
+      totalDeposited: Number(balance) || 0,
+      activated: Number(balance) >= MIN_ACTIVATION_DEPOSIT,
+      verified: true,
+      active: true,
+      createdAt: new Date().toISOString()
     });
+    res.json({ success: true, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-  res.json({ success: true });
 });
 
-router.post('/admin/deposits/:id/reject', authAdmin, (req, res) => {
-  const list = store.getDeposits();
-  const reqItem = list.find(r => r.id === req.params.id);
-  if (!reqItem || reqItem.status !== 'pending') {
-    return res.status(400).json({ success: false, message: 'Invalid request.' });
+router.post('/admin/users/:id/toggle', authAdmin, async (req, res) => {
+  try {
+    const user = await store.findUserById(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    const updated = await store.updateUser(user.id, { active: user.active === false });
+    res.json({ success: true, active: updated.active });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-  reqItem.status = 'rejected';
-  store.saveDeposits(list);
-  const user = store.findUserById(reqItem.userId);
-  if (user && user.transactions) {
-    const tx = user.transactions.find(t => t.type === 'deposit' && t.amount === reqItem.amount && t.status === 'pending');
-    if (tx) tx.status = 'rejected';
-    store.updateUser(user.id, { transactions: user.transactions });
-  }
-  res.json({ success: true });
 });
 
-router.get('/admin/withdraws', authAdmin, (req, res) => {
-  res.json({ success: true, withdraws: store.getWithdraws() });
+router.delete('/admin/users/:id', authAdmin, async (req, res) => {
+  try {
+    await store.deleteUser(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
-router.post('/admin/withdraws/:id/approve', authAdmin, (req, res) => {
-  const list = store.getWithdraws();
-  const reqItem = list.find(r => r.id === req.params.id);
-  if (!reqItem || reqItem.status !== 'pending') {
-    return res.status(400).json({ success: false, message: 'Invalid request.' });
+router.post('/admin/funds', authAdmin, async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    const amt = parseFloat(amount);
+    if (!userId || !amt || amt <= 0) return res.status(400).json({ success: false, message: 'Invalid input.' });
+    const user = await store.findUserById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    const transactions = user.transactions || [];
+    transactions.unshift({
+      id: uuidv4(),
+      type: 'deposit',
+      amount: amt,
+      status: 'completed',
+      date: new Date().toISOString(),
+      note: 'Admin credit'
+    });
+    await store.updateUser(userId, { transactions });
+    const updated = await applyDepositCredit(userId, amt);
+    res.json({ success: true, balance: updated.balance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-  reqItem.status = 'approved';
-  store.saveWithdraws(list);
-  const user = store.findUserById(reqItem.userId);
-  if (user && user.transactions) {
-    const tx = user.transactions.find(t => t.type === 'withdraw' && t.amount === reqItem.amount && t.status === 'pending');
-    if (tx) tx.status = 'completed';
-    store.updateUser(user.id, { transactions: user.transactions });
-  }
-  res.json({ success: true });
 });
 
-router.post('/admin/withdraws/:id/reject', authAdmin, (req, res) => {
-  const list = store.getWithdraws();
-  const reqItem = list.find(r => r.id === req.params.id);
-  if (!reqItem || reqItem.status !== 'pending') {
-    return res.status(400).json({ success: false, message: 'Invalid request.' });
+router.get('/admin/deposits', authAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, deposits: await store.getDeposits() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
-  reqItem.status = 'rejected';
-  store.saveWithdraws(list);
-  const user = store.findUserById(reqItem.userId);
-  if (user) {
-    user.balance = Number(user.balance || 0) + Number(reqItem.amount);
-    if (user.transactions) {
-      const tx = user.transactions.find(t => t.type === 'withdraw' && t.amount === reqItem.amount && t.status === 'pending');
-      if (tx) tx.status = 'rejected';
+});
+
+router.post('/admin/deposits/:id/approve', authAdmin, async (req, res) => {
+  try {
+    const reqItem = await store.findDeposit(req.params.id);
+    if (!reqItem || reqItem.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Invalid request.' });
     }
-    store.updateUser(user.id, { balance: user.balance, transactions: user.transactions });
-  }
-  res.json({ success: true });
-});
+    await store.updateDeposit(reqItem.id, { status: 'approved' });
 
-router.get('/admin/codes', authAdmin, (req, res) => {
-  res.json({ success: true, codes: store.getCodes() });
-});
-
-router.post('/admin/codes', authAdmin, (req, res) => {
-  const price = parseFloat(req.body.price);
-  const count = parseInt(req.body.count, 10) || 1;
-  if (!price || price <= 0) return res.status(400).json({ success: false, message: 'Invalid price.' });
-  if (count < 1 || count > 50) return res.status(400).json({ success: false, message: 'Count 1–50.' });
-
-  const codes = store.getCodes();
-  const created = [];
-  for (let i = 0; i < count; i++) {
-    const code = Array.from({ length: 3 }, () =>
-      Math.random().toString(36).substring(2, 6).toUpperCase()
-    ).join('-');
-    const entry = { code, price, used: false, usedBy: null, usedAt: null, createdAt: new Date().toISOString() };
-    codes.unshift(entry);
-    created.push(entry);
-  }
-  store.saveCodes(codes);
-  res.json({ success: true, created });
-});
-
-router.get('/admin/settings', authAdmin, (req, res) => {
-  const s = store.getSettings();
-  res.json({
-    success: true,
-    settings: {
-      btcWallet: s.btcWallet || '',
-      contactEmail: s.contactEmail || '',
-      contactPhone: s.contactPhone || '',
-      contactAddress: s.contactAddress || ''
+    const user = await store.findUserById(reqItem.userId);
+    if (user) {
+      const transactions = (user.transactions || []).map(t => {
+        if (t.type === 'deposit' && t.amount === reqItem.amount && t.status === 'pending') {
+          return { ...t, status: 'completed' };
+        }
+        return t;
+      });
+      await store.updateUser(user.id, { transactions });
+      await applyDepositCredit(user.id, reqItem.amount);
     }
-  });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
-router.put('/admin/settings', authAdmin, (req, res) => {
-  const s = store.getSettings();
-  if (req.body.btcWallet !== undefined) s.btcWallet = req.body.btcWallet.trim();
-  if (req.body.contactEmail !== undefined) s.contactEmail = req.body.contactEmail.trim();
-  if (req.body.contactPhone !== undefined) s.contactPhone = req.body.contactPhone.trim();
-  if (req.body.contactAddress !== undefined) s.contactAddress = req.body.contactAddress.trim();
-  store.saveSettings(s);
-  res.json({ success: true });
+router.post('/admin/deposits/:id/reject', authAdmin, async (req, res) => {
+  try {
+    const reqItem = await store.findDeposit(req.params.id);
+    if (!reqItem || reqItem.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Invalid request.' });
+    }
+    await store.updateDeposit(reqItem.id, { status: 'rejected' });
+    const user = await store.findUserById(reqItem.userId);
+    if (user && user.transactions) {
+      const transactions = user.transactions.map(t => {
+        if (t.type === 'deposit' && t.amount === reqItem.amount && t.status === 'pending') {
+          return { ...t, status: 'rejected' };
+        }
+        return t;
+      });
+      await store.updateUser(user.id, { transactions });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
-router.get('/admin/notifications', authAdmin, (req, res) => {
-  res.json({ success: true, notifications: store.getNotifications() });
+router.get('/admin/withdraws', authAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, withdraws: await store.getWithdraws() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
-router.get('/admin/messages', authAdmin, (req, res) => {
-  res.json({ success: true, messages: store.getMessages() });
+router.post('/admin/withdraws/:id/approve', authAdmin, async (req, res) => {
+  try {
+    const reqItem = await store.findWithdraw(req.params.id);
+    if (!reqItem || reqItem.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Invalid request.' });
+    }
+    await store.updateWithdraw(reqItem.id, { status: 'approved' });
+    const user = await store.findUserById(reqItem.userId);
+    if (user && user.transactions) {
+      const transactions = user.transactions.map(t => {
+        if (t.type === 'withdraw' && t.amount === reqItem.amount && t.status === 'pending') {
+          return { ...t, status: 'completed' };
+        }
+        return t;
+      });
+      await store.updateUser(user.id, { transactions });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.post('/admin/withdraws/:id/reject', authAdmin, async (req, res) => {
+  try {
+    const reqItem = await store.findWithdraw(req.params.id);
+    if (!reqItem || reqItem.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Invalid request.' });
+    }
+    await store.updateWithdraw(reqItem.id, { status: 'rejected' });
+    const user = await store.findUserById(reqItem.userId);
+    if (user) {
+      const balance = Number(user.balance || 0) + Number(reqItem.amount);
+      const transactions = (user.transactions || []).map(t => {
+        if (t.type === 'withdraw' && t.amount === reqItem.amount && t.status === 'pending') {
+          return { ...t, status: 'rejected' };
+        }
+        return t;
+      });
+      await store.updateUser(user.id, { balance, transactions });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.get('/admin/codes', authAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, codes: await store.getCodes() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.post('/admin/codes', authAdmin, async (req, res) => {
+  try {
+    const { code, price, count } = req.body;
+    const priceNum = parseFloat(price);
+    if (!priceNum || priceNum <= 0) return res.status(400).json({ success: false, message: 'Invalid price.' });
+
+    const created = [];
+    const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), 50);
+    for (let i = 0; i < n; i++) {
+      const c = (code && n === 1)
+        ? String(code).trim().toUpperCase()
+        : uuidv4().replace(/-/g, '').slice(0, 12).toUpperCase();
+      const item = await store.createCode({
+        id: uuidv4(),
+        code: c,
+        price: priceNum,
+        used: false,
+        createdAt: new Date().toISOString()
+      });
+      created.push(item);
+    }
+    res.json({ success: true, codes: created });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.delete('/admin/codes/:id', authAdmin, async (req, res) => {
+  try {
+    await store.deleteCode(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.get('/admin/messages', authAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, messages: await store.getMessages() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.get('/admin/notifications', authAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, notifications: await store.getNotifications() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.get('/admin/settings', authAdmin, async (req, res) => {
+  try {
+    const s = await store.getSettings();
+    res.json({
+      success: true,
+      settings: {
+        btcWallet: s.btcWallet,
+        contactEmail: s.contactEmail,
+        contactPhone: s.contactPhone,
+        contactAddress: s.contactAddress
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+router.put('/admin/settings', authAdmin, async (req, res) => {
+  try {
+    const { btcWallet, contactEmail, contactPhone, contactAddress } = req.body;
+    const s = await store.saveSettings({
+      btcWallet: btcWallet || '',
+      contactEmail: contactEmail || '',
+      contactPhone: contactPhone || '',
+      contactAddress: contactAddress || ''
+    });
+    res.json({ success: true, settings: s });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 });
 
 module.exports = router;
